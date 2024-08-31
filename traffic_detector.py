@@ -12,7 +12,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, message="torch.cuda.am
 
 # Load the YOLOv5 model
 print("Loading YOLOv5 model...")
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+model = torch.hub.load('ultralytics/yolov5', 'yolov5x', pretrained=True)
 print("Model loaded successfully.")
 
 # Video paths for four lanes (assuming separate videos for each lane)
@@ -54,6 +54,7 @@ print("Video writers initialized.")
 
 # Initialize baseline green light time (in seconds)
 baseline_time = 0.1  # 5 seconds for each lane
+yellow_light_time = 2  # Yellow light duration set to 2 seconds
 
 # Initialize the tkinter window
 root = tk.Tk()
@@ -78,11 +79,11 @@ os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
 
 # Initialize cycle count and set a limit for testing
 cycle_count = 0
-cycle_limit = 10  # Limit to 4 cycles for testing
+cycle_limit = 20  # Limit to 20 cycles for testing
 
 with open(log_file_path, 'w', newline='') as log_file:
     log_writer = csv.writer(log_file)
-    log_writer.writerow(['Cycle', 'Lane', 'Vehicle Count', 'Signal', 'Green Light Time'])
+    log_writer.writerow(['Cycle', 'Lane', 'Vehicle Count', 'Signal', 'Green Light Time', 'Yellow Light Time'])
 
 # Initialize timestamps for each lane to 0
 lane_timestamps = [0 for _ in range(4)]  # Start time for each lane in seconds
@@ -133,7 +134,6 @@ def process_lane(idx, cap, video_writer):
 # Function to update the GUI with current lane statuses
 def update_gui():
     global cycle_count
-    all_videos_ended = True
     print("\nProcessing frames from all lanes...")
     vehicle_counts = []
 
@@ -144,16 +144,17 @@ def update_gui():
     # Check results and update GUI
     for idx, result in enumerate(results):
         if result[0] is None:  # If video has ended for this lane
-            continue
-        all_videos_ended = False  # At least one video is still running
+            print(f"Video for Lane {idx + 1} has ended. Stopping simulation.")
+            root.quit()  # End the GUI loop immediately
+            return
 
         vehicle_count, frame = result
         vehicle_counts.append(vehicle_count)
         vehicle_counts_vars[idx].set(str(vehicle_count))
 
-    if all_videos_ended or cycle_count >= cycle_limit:
-        print("All videos have ended or cycle limit reached. Stopping simulation.")
-        root.quit()  # End the GUI loop
+    if cycle_count >= cycle_limit:
+        print("Cycle limit reached. Stopping simulation.")
+        root.quit()  # End the GUI loop if cycle limit is reached
         return
 
     # Calculate total vehicles across all lanes
@@ -170,13 +171,28 @@ def update_gui():
     for i in range(4):
         if len(vehicle_counts) <= i:
             continue  # Skip this lane if no vehicle count is available
-        
-        print(f"\nGreen Light: Lane {i+1}")
-        print(f"Lane {i+1}: Green light for {lane_timings[i]:.2f} seconds")
 
-        # Update the GUI for the current signal status
+        # Yellow light phase for the previous lane (if not the first lane in cycle)
+        if i > 0:
+            previous_lane = i - 1
+        else:
+            previous_lane = 3  # Loop back to the last lane
+
+        print(f"\nYellow Light: Lane {previous_lane + 1} for {yellow_light_time} seconds before Lane {i+1} turns green")
+
         for j in range(4):
-            if i == j:
+            if j == previous_lane:
+                lane_states[j].set("Yellow")
+            else:
+                lane_states[j].set("Red")
+
+        root.update()
+        time.sleep(yellow_light_time)
+
+        # Now give green light to the current lane
+        print(f"Green Light: Lane {i+1} for {lane_timings[i]:.2f} seconds")
+        for j in range(4):
+            if j == i:
                 lane_states[j].set("Green")
             else:
                 lane_states[j].set("Red")
@@ -185,22 +201,22 @@ def update_gui():
         # Log the current signal state and timings to file
         with open(log_file_path, 'a', newline='') as log_file:
             log_writer = csv.writer(log_file)
-            log_writer.writerow([cycle_count + 1, f'Lane {i+1}', vehicle_counts[i], 'Green' if i == j else 'Red', lane_timings[i]])
+            log_writer.writerow([cycle_count + 1, f'Lane {i+1}', vehicle_counts[i], "Green", lane_timings[i]])
 
-        # Update the timestamp for the next cycle based on the elapsed green time
-        lane_timestamps[i] += lane_timings[i]  # Increment by the green light time
-
-        # Simulate waiting time for the green light of the current lane
+        lane_timestamps[i] += lane_timings[i]
         time.sleep(lane_timings[i])
 
-    cycle_count += 1  # Increment the cycle count after completing a round
+    cycle_count += 1
     root.after(1000, update_gui)  # Schedule the next update after a short delay
 
-# Start the simulation
-root.after(1000, update_gui)
+
+# Schedule the initial GUI update
+root.after(200, update_gui)
+
+# Start the tkinter main loop
 root.mainloop()
 
-# Release all captures and close windows
+# Release video captures and writers after the loop ends
 for cap in caps:
     cap.release()
 
@@ -208,4 +224,4 @@ for writer in video_writers:
     writer.release()
 
 cv2.destroyAllWindows()
-print("All video captures released, program ended.")
+print("Program exited successfully.")
