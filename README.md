@@ -1,5 +1,5 @@
 
-![Logo](https://i.postimg.cc/d0Q1LN74/NEXUS-LOGO.png)
+![Logo](https://i.postimg.cc/mkc0wgyp/1.png)
 
 
 # AI Based Traffic Management System
