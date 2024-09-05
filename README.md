@@ -81,7 +81,7 @@ This project is an AI-based Traffic Management System that dynamically allocates
 ## Future Improvements:
 - **Web-based Interface:** Shift the GUI to a web-based platform for easier access and remote control.
 - **Scalability:** Adapt the system to handle larger, more complex intersections.
-- **Real-time CCTB integration:** Allow for direct input from live traffic camera feeds for more comprehensive testing.
+- **Real-time CCTV integration:** Allow for direct input from live traffic camera feeds for more comprehensive testing.
 - **Machine Learning Enhancements:** Explore other AI models to improve detection accuracy and reduce processing time.
 
 ---
