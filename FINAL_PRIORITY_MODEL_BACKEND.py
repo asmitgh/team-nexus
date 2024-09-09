@@ -114,6 +114,9 @@ lane_timestamps = [0 for _ in range(4)]  # Start time for each lane in seconds
 # Class index for emergency vehicles in your model (change if necessary)
 emergency_vehicle_class_index = 5  # Replace with your actual index for emergency vehicles
 
+# Class index for accident vehicles in your model (change if necessary)
+accident_vehicle_class_index = 0  # Replace with your actual index for emergency vehicles
+
 # Function to skip frames to the required timestamp
 def set_video_to_timestamp(cap, timestamp, fps):
     # Calculate frame number to seek to based on the timestamp and fps
@@ -130,21 +133,34 @@ def count_vehicles(frame):
 
 # Function to detect emergency vehicles in a frame using custom YOLOv5 model
 def detect_emergency_vehicles(frame):
-    print("Detecting emergency vehicles...")
+    print("...Detecting emergency vehicles...")
     results = custom_model(frame)
     detected_classes = results.pandas().xyxy[0]['class'].tolist()
     emergency_detected = any(cls == emergency_vehicle_class_index for cls in detected_classes)
     print(f"Emergency vehicle detected: {emergency_detected}")
     return emergency_detected, results
 
+# Function to detect emergency vehicles in a frame using custom YOLOv5 model
+def detect_accident_vehicles(frame):
+    print("...Detecting accident vehicles...")
+    results = custom_model(frame)
+    detected_classes = results.pandas().xyxy[0]['class'].tolist()
+    accident_detected = any(cls == accident_vehicle_class_index for cls in detected_classes)
+    print(f"Emergency vehicle detected: {accident_detected}")
+    return accident_detected, results
+
 # Add a new list to keep track of whether an emergency vehicle is currently detected in each lane
 emergency_vehicle_active = [False] * 4
 
+# Add a new list to keep track of whether an emergency vehicle is currently detected in each lane
+accident_vehicle_active = [False] * 4
+
 # Number of seconds to skip for faster emergency detection
 emergency_time_skip = 0.6  # Skip 1 second in case of emergency detection
+accident_time_skip=0.6
 
 # Function to process a frame for a single lane
-def process_lane(idx, cap, video_writer, skip_time=False):
+def process_lane(idx, cap, video_writer, skip_time=False , skip_time1=False):
     
      # Skip to the correct timestamp for this lane   
     if skip_time:
@@ -152,6 +168,14 @@ def process_lane(idx, cap, video_writer, skip_time=False):
         current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # Current time in seconds
         # Calculate the new timestamp by skipping ahead
         new_time = current_time + emergency_time_skip
+        set_video_to_timestamp(cap, new_time, fps)
+        lane_timestamps[idx] = new_time  # Update the timestamp after skipping
+        print(f"Skipping {emergency_time_skip} seconds for Lane {idx + 1} due to emergency.")
+    elif skip_time1:
+        # Get the current timestamp
+        current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # Current time in seconds
+        # Calculate the new timestamp by skipping ahead
+        new_time = current_time + accident_time_skip
         set_video_to_timestamp(cap, new_time, fps)
         lane_timestamps[idx] = new_time  # Update the timestamp after skipping
         print(f"Skipping {emergency_time_skip} seconds for Lane {idx + 1} due to emergency.")
@@ -176,25 +200,47 @@ def process_lane(idx, cap, video_writer, skip_time=False):
     # Detect emergency vehicles and get detection results
     emergency_detected, emergency_results = detect_emergency_vehicles(frame)
 
-    # Draw bounding boxes on the frame
-    for *xyxy, conf, cls in emergency_results.xyxy[0]:
-        color = (0, 0, 255) if cls == emergency_vehicle_class_index else (0, 255, 0)
-        cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), color, 2)
-        label = f"{emergency_results.names[int(cls)]} {conf:.2f}"
-        cv2.putText(frame, label, (int(xyxy[0]), int(xyxy[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    # Detect accident vehicles and get detection results
+    accident_detected, accident_results = detect_accident_vehicles(frame)
+    if emergency_detected:
+        # Draw bounding boxes on the frame
+        for *xyxy, conf, cls in emergency_results.xyxy[0]:
+            color = (0, 0, 255) if cls == emergency_vehicle_class_index else (0, 255, 0)
+            cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), color, 2)
+            label = f"{emergency_results.names[int(cls)]} {conf:.2f}"
+            cv2.putText(frame, label, (int(xyxy[0]), int(xyxy[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    elif accident_detected:
+        # Draw bounding boxes on the frame
+        for *xyxy, conf, cls in accident_results.xyxy[0]:
+            color = (0, 255, 255) if cls == accident_vehicle_class_index else (0, 255, 0)
+            cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), color, 2)
+            label = f"{accident_results.names[int(cls)]} {conf:.2f}"
+            cv2.putText(frame, label, (int(xyxy[0]), int(xyxy[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    else :
+            # Draw bounding boxes on the frame
+            for *xyxy, conf, cls in results.xyxy[0]:
+                cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0, 255, 0), 2)
     
+        
     # Write the processed frame to output video
     video_writer.write(frame)
 
     if emergency_detected:
-        print(f"Emergency vehicle detected in Lane {idx + 1}!")
+        print(f"Emergency vehicle detected in Lane {idx + 1}!\n")
         emergency_vehicle_active[idx] = True  # Set flag for this lane
     else:
         emergency_vehicle_active[idx] = False  # Reset flag if no emergency vehicle is detected
+    
+    if accident_detected:
+        print(f"Accident detected in Lane {idx + 1}!\n")
+        accident_vehicle_active[idx] = True  # Set flag for this lane
+    else:
+        accident_vehicle_active[idx] = False  # Reset flag if accident is detected
+    
 
     # Update the lane timestamp based on the time elapsed during processing
     lane_timestamps[idx] += (1 / fps)  # Move forward by one frame's duration
-    return vehicle_count, frame, emergency_detected
+    return vehicle_count, frame, emergency_detected , accident_detected
 
 # Function to update the GUI with current lane statuses
 def update_gui():
@@ -202,7 +248,7 @@ def update_gui():
     print("\nProcessing frames from all lanes...")
     vehicle_counts = []
     emergency_vehicle_detected_in_any_lane = False
-
+    accident_vehicle_detected_in_any_lane = False
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
             executor.submit(process_lane, idx, caps[idx], video_writers[idx], emergency_vehicle_active[idx]) 
@@ -217,13 +263,18 @@ def update_gui():
             root.quit()  # End the GUI loop immediately
             return
 
-        vehicle_count, frame, emergency_detected = result
+        vehicle_count, frame, emergency_detected,accident_detected = result
         vehicle_counts.append(vehicle_count)
         if emergency_detected:
             emergency_vehicle_detected_in_any_lane = True
             print(f"Emergency vehicle detected in Lane {idx + 1}!")
-        vehicle_counts_vars[idx].set(str(vehicle_count))
+        
+        if accident_detected:
+            accident_vehicle_detected_in_any_lane = True
+            print(f"Accident detected in Lane {idx + 1}!")
 
+        vehicle_counts_vars[idx].set(str(vehicle_count))
+    
     if cycle_count >= cycle_limit:
         print("Cycle limit reached. Stopping simulation.")
         root.quit()  # End the GUI loop if cycle limit is reached
@@ -248,7 +299,7 @@ def update_gui():
 
     # Determine green light time for each lane based on vehicle count
     lane_timings = [
-        baseline_time + (count / total_vehicles) * 3.9
+        baseline_time + (count / total_vehicles) * 4.1
         for count in vehicle_counts
     ]
 
@@ -269,13 +320,36 @@ def update_gui():
                     time.sleep(1)  # Pause for a second before next check
 
                     # Process next frame to check if emergency vehicle is still detected by skipping time
-                    _, _, emergency_detected = process_lane(idx, caps[idx], video_writers[idx], skip_time=True)
+                    _, _, emergency_detected ,_ = process_lane(idx, caps[idx], video_writers[idx], skip_time=True,skip_time1=False)
                     emergency_vehicle_active[idx] = emergency_detected
 
                 print(f"\nEmergency vehicle passed in Lane {idx + 1}. Resuming normal traffic control.\n")
                 lane_states[idx].set("RED")
                 root.update()
+    elif accident_vehicle_detected_in_any_lane:
+        for idx, active in enumerate(accident_vehicle_active):
+            if active:
+                print(f"Accident detected in Lane {idx + 1}, setting red light until accident is cleared.")
+                # Set all signals to red when an accident is detected
+                for j in range(4):
+                    lane_states[j].set("RED")
+                    right_turn_signals[j].set("RED")
+                    left_turn_signals[j].set("RED")
+                root.update()
 
+                # Continue checking if emergency vehicle is still detected
+                while accident_vehicle_active[idx]:
+                    print(f"Keeping Lane {idx + 1} red for emergency .")
+                    root.update()
+                    time.sleep(1)  # Pause for a second before next check
+
+                    # Process next frame to check if emergency vehicle is still detected by skipping time
+                    _, _, _,accident_detected = process_lane(idx, caps[idx], video_writers[idx], skip_time=False,skip_time1=True)
+                    accident_vehicle_active[idx] = accident_detected
+
+                print(f"\n Accident safely cleared from lane {idx + 1}\n. Resuming normal traffic control.\n")
+                lane_states[idx].set("RED")
+                root.update()
     else:               
         # Sort lanes by vehicle count to determine the order of green signals
         sorted_lane_indices = sorted(range(4), key=lambda idx: vehicle_counts[idx], reverse=True)
