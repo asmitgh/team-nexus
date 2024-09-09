@@ -24,6 +24,10 @@ print("Loading Manually Tunned YOLOv5 model...")
 model = torch.hub.load('ultralytics/yolov5', 'yolov5x', pretrained=True)
 print("Model loaded successfully.")
 
+total_vehicle_counts = [0] * 4
+total_emergency_detection = [0] * 4
+total_green_light_time = [0] * 4
+
 # Load the fine-tuned YOLOv5 model for emergency vehicles
 print("Loading custom YOLOv5 model for emergency vehicles...")
 custom_model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True)
@@ -82,15 +86,23 @@ os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
 cycle_count = 0
 cycle_limit = 20  # Limit to 5 cycles for testing
 
+# Initialize tracking variables for statistics
+total_vehicle_count_per_cycle = [0] * 4  # Tracks total vehicles for each lane across cycles
+cumulative_green_light_time = [0] * 4  # Cumulative green light time per lane
+emergency_detections_per_cycle = 0  # Counts total emergency vehicle detections per cycle
+cycle_frame_processing_times = []  # Track processing times for each frame
+
 with open(log_file_path, 'w', newline='') as log_file:
     log_writer = csv.writer(log_file)
-    log_writer.writerow(['Cycle', 'Lane', 'Vehicle Count', 'Signal', 'Green Light Time','Emergency Vehicle Detected'])
+    log_writer.writerow(['Cycle', 'Lane', 'Vehicle Count', 'Percentage of Vehicle', 'Green Light Time','Emergency Vehicle Detection','Accident Detection'])
 
 # Initialize timestamps for each lane to 0
 lane_timestamps = [0 for _ in range(4)]  # Start time for each lane in seconds
 
 # Class index for emergency vehicles in your model (change if necessary)
 emergency_vehicle_class_index = 5  # Replace with your actual index for emergency vehicles
+
+accident_vehicle_class_index = 0  # Replace with your actual index for accident vehicles
 
 # Function to skip frames to the required timestamp
 def set_video_to_timestamp(cap, timestamp, fps):
@@ -129,19 +141,29 @@ def detect_emergency_vehicles(frame):
     print(f"Emergency vehicle detected: {emergency_detected}")
     return emergency_detected, results
 
+def detect_accident_vehicles(frame):
+    print("...Detecting accident vehicles...\n")
+    results=custom_model(frame)
+    detected_classes=results.pandas().xyxy[0]['class'].tolist()
+    accident_detected=any(cls == accident_vehicle_class_index for cls in detected_classes)
+    print(f"Emergency vehicle detected :{accident_detected}")
+    return accident_detected, results
+
 # Add a new list to keep track of whether an emergency vehicle is currently detected in each lane
 emergency_vehicle_active = [False] * 4
 
-# Number of frames to skip for faster emergency detection (adjust as needed)
+# Add a new list to keep track of whether an accident vehicle is currently detected in each lane
+accident_vehicle_active = [False] * 4
 
 # Number of seconds to skip for faster emergency detection
 emergency_time_skip = 0.6  # Skip 1 second in case of emergency detection
+accident_time_skip = 2
 
-def process_lane(idx, cap, video_writer, skip_time=False):
+def process_lane(idx, cap, video_writer, skip_time_emergency=False, skip_time_accident=False):
     global lane_timestamps
     
     # Skip to the correct timestamp for this lane
-    if skip_time:
+    if skip_time_emergency:
         # Get the current timestamp
         current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # Current time in seconds
         # Calculate the new timestamp by skipping ahead
@@ -149,12 +171,20 @@ def process_lane(idx, cap, video_writer, skip_time=False):
         set_video_to_timestamp(cap, new_time, fps)
         lane_timestamps[idx] = new_time  # Update the timestamp after skipping
         print(f"Skipping {emergency_time_skip} seconds for Lane {idx + 1} due to emergency.")
+    elif skip_time_accident:
+        # Get the current timestamp
+        current_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # Current time in seconds
+        # Calculate the new timestamp by skipping ahead
+        new_time = current_time + accident_time_skip
+        set_video_to_timestamp(cap, new_time, fps)
+        lane_timestamps[idx] = new_time  # Update the timestamp after skipping
+        print(f"Skipping {accident_time_skip} seconds for Lane {idx + 1} due to accident.")
     else:
         set_video_to_timestamp(cap, lane_timestamps[idx], fps)
 
     ret, frame = cap.read()
     if not ret:
-        return None, None  # Indicate that the video has ended
+        return None, None, None  # Indicate that the video has ended
 
     print(f"Frame captured from Lane {idx + 1}.")
     
@@ -172,12 +202,26 @@ def process_lane(idx, cap, video_writer, skip_time=False):
     # Detect emergency vehicles and get detection results
     emergency_detected, emergency_results = detect_emergency_vehicles(frame)
 
+    # Detect accident vehicles and get detection results
+    accident_detected, accident_results = detect_accident_vehicles(frame)
+
     # Draw bounding boxes on the frame
-    for *xyxy, conf, cls in emergency_results.xyxy[0]:
-        color = (0, 0, 255) if cls == emergency_vehicle_class_index else (0, 255, 0)
-        cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), color, 2)
-        label = f"{emergency_results.names[int(cls)]} {conf:.2f}"
-        cv2.putText(frame, label, (int(xyxy[0]), int(xyxy[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    # Draw bounding boxes on the frame for emergency and accident vehicles
+    if emergency_detected:
+        for *xyxy, conf, cls in emergency_results.xyxy[0]:
+            color = (0, 0, 255) if cls == emergency_vehicle_class_index else (0, 255, 0)
+            cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), color, 2)
+            label = f"{emergency_results.names[int(cls)]} {conf:.2f}"
+            cv2.putText(frame, label, (int(xyxy[0]), int(xyxy[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    elif accident_detected:
+        for *xyxy, conf, cls in accident_results.xyxy[0]:
+            color = (0, 255, 255) if cls == accident_vehicle_class_index else (0, 255, 255)
+            cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), color, 2)
+            label = f"{accident_results.names[int(cls)]} {conf:.2f}"
+            cv2.putText(frame, label, (int(xyxy[0]), int(xyxy[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    else:
+        for *xyxy,conf,cls in results.xyxy[0]:
+            cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0,255,0), 2)
 
     # Write the processed frame to output video
     video_writer.write(frame)
@@ -188,12 +232,17 @@ def process_lane(idx, cap, video_writer, skip_time=False):
     else:
         emergency_vehicle_active[idx] = False  # Reset flag if no emergency vehicle is detected
 
+    if accident_detected:
+        print(f"Accident detected in Lane {idx + 1}!")
+        accident_vehicle_active[idx] = True  # Set flag for this lane
+    else:
+        accident_vehicle_active[idx] = False  # Reset flag if no accident is detected
+
     # Update the lane timestamp based on the time elapsed during processing
     lane_timestamps[idx] += (1 / fps)  # Move forward by one frame's duration
+    return vehicle_count, frame, emergency_detected , accident_detected
 
-    return vehicle_count, frame, emergency_detected
-
-def update_gui(lane_status, current_lane, time_left, vehicle_counts, emergency_vehicle_detected):
+def update_gui(lane_status, current_lane, time_left, vehicle_counts, emergency_vehicle_detected, accident_vehicle_detected):
     global left_turn_signal
 
     # Use the background image as the base for the simulation window
@@ -202,7 +251,7 @@ def update_gui(lane_status, current_lane, time_left, vehicle_counts, emergency_v
 
     lane_names = ["North (Lane 1)", "East (Lane 2)", "South (Lane 3)", "West (Lane 4)"]
 
-    colors = {"Green": (0, 255, 0), "Red": (0, 0, 255), "Yellow": (0, 255, 255), "White": (255, 255, 255), "Magenta": (170,178,32), "Black": (0,0,0), "Orange":(0,69,255), "Blue": (112,25,25), "Brown" : (19,69,139), "olive" : (0,128,128), "dodger blue" : (255,144,30), "gold":(0,215,255)}
+    colors = {"Green": (0, 255, 0), "Red": (0, 0, 255), "Yellow": (0, 255, 255), "White": (255, 255, 255), "Magenta": (170,178,32), "Black": (0,0,0), "Orange":(0,69,255), "Blue": (112,25,25), "Brown" : (19,69,139), "olive" : (0,128,128), "dodger blue" : (255,144,30), "gold":(0,215,255), "Default" : (100,100,100)}
 
     # Define positions for each lane's text information (adjusted)
     positions = [
@@ -240,12 +289,18 @@ def update_gui(lane_status, current_lane, time_left, vehicle_counts, emergency_v
     for i in range(4):
         
         #Colour for left turn signal(default)
-        left_turn_signal = colors["Green"] if (i == current_lane and time_left > yellow_light_time) else colors["Green"]
+        if accident_vehicle_detected:
+            left_turn_signal = colors["Default"]
+        else:
+            left_turn_signal = colors["Green"] if (i == current_lane and time_left > yellow_light_time) else colors["Green"]
 
         # Lane text 
         if(emergency_vehicle_detected and i == current_lane):
             lane_status = "Green"
             lane_color = colors["Green"]
+        elif(accident_vehicle_detected):
+            lane_status = "Red"
+            lane_color = colors["Red"]
         else:
             if i == current_lane:
                 if time_left <= yellow_light_time:
@@ -270,6 +325,11 @@ def update_gui(lane_status, current_lane, time_left, vehicle_counts, emergency_v
                 cv2.putText(window,f"Wait for the Next Signal...",(positions[i][0], positions[i][1] + 80), cv2.FONT_HERSHEY_SIMPLEX, 1, time_color, 2, cv2.LINE_AA)
             else:
                 cv2.putText(window, f"EMERGENCY VEHICLE DETECTED!!!",(positions[i][0], positions[i][1] + 80), cv2.FONT_HERSHEY_TRIPLEX, 1, colors["Red"], 2, cv2.LINE_AA)
+        elif (accident_vehicle_detected):
+            if(i!=current_lane):
+                cv2.putText(window,f"WAIT FOR CLEARANCE...",(positions[i][0], positions[i][1] + 80), cv2.FONT_HERSHEY_SIMPLEX, 1, time_color, 2, cv2.LINE_AA)
+            else:
+                cv2.putText(window, f"ACCIDENT DETECTED!!!",(positions[i][0], positions[i][1] + 80), cv2.FONT_HERSHEY_TRIPLEX, 1, colors["Red"], 2, cv2.LINE_AA)
         else:
             cv2.putText(window, f"Time Left: {time_left:.2f} sec" if i == current_lane else f"Wait for the Next Signal...",
                     (positions[i][0], positions[i][1] + 80), cv2.FONT_HERSHEY_SIMPLEX, 1, time_color, 2, cv2.LINE_AA)
@@ -281,155 +341,207 @@ def update_gui(lane_status, current_lane, time_left, vehicle_counts, emergency_v
 
         if i == 0:
             # Draw the traffic lights (small circles) for 5 signals per lane
+            if(accident_vehicle_detected):
+                # Red Light Signals
+                red_light_color = colors["Red"]
+                cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + 200), 20, red_light_color, -1)
 
-            # Red Light Signals
-            red_light_color = colors["Red"] if i != current_lane else (100, 100, 100)
-            cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + 200), 20, red_light_color, -1)
+                # Yellow Light Signals
+                yellow_light_color = colors["Default"]
+                cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + 150), 20, yellow_light_color, -1)
 
-            # Yellow Light Signals
-            yellow_light_color = colors["Yellow"] if (i == current_lane and time_left <= yellow_light_time) else (100, 100, 100)
-            cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + 150), 20, yellow_light_color, -1)
-
-            # Green Light Signals
-            for j in range(3):
-                y_offset = 0 + j * 50
-                if(emergency_vehicle_detected):
-                    green_light_color = colors["Green"] if i == current_lane else (100, 100, 100)
-                    cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 20, green_light_color, -1)
-                else:
-                    green_light_color = colors["Green"] if i == current_lane and time_left > yellow_light_time  else (100, 100, 100)
+                for j in range(3):
+                    y_offset = 0 + j * 50
+                    green_light_color = colors["Default"]
                     cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 20, green_light_color, -1)
 
-                # Draw the arrows at the green light positions
-                if green_light_color == colors["Green"]:
-                    if j==0:
-                        # For Right Turn
-                        draw_arrow(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 'left', colors["Black"])
-                    elif j==1:
-                        # For Straight
-                        draw_arrow(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 'down', colors["Black"])
-                    elif j==2:
-                        # For Left Turn
-                        draw_arrow(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 'right', colors["Black"])
+            else:
+                # Red Light Signals
+                red_light_color = colors["Red"] if i != current_lane else (100, 100, 100)
+                cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + 200), 20, red_light_color, -1)
 
-                #Left Turn Signals separately 
-                cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + 100), 20, left_turn_signal, -1)
-                draw_arrow(window, (light_positions[i][0] + 14, light_positions[i][1] + 100), 'right', colors["Black"])
+                # Yellow Light Signals
+                yellow_light_color = colors["Yellow"] if (i == current_lane and time_left <= yellow_light_time and (not emergency_vehicle_detected)) else (100, 100, 100)
+                cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + 150), 20, yellow_light_color, -1)
+
+                # Green Light Signals
+                for j in range(3):
+                    y_offset = 0 + j * 50
+                    if(emergency_vehicle_detected):
+                        green_light_color = colors["Green"] if i == current_lane else (100, 100, 100)
+                        cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 20, green_light_color, -1)
+                    else:
+                        green_light_color = colors["Green"] if i == current_lane and time_left > yellow_light_time  else (100, 100, 100)
+                        cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 20, green_light_color, -1)
+
+                    # Draw the arrows at the green light positions
+                    if green_light_color == colors["Green"]:
+                        if j==0:
+                            # For Right Turn
+                            draw_arrow(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 'left', colors["Black"])
+                        elif j==1:
+                            # For Straight
+                            draw_arrow(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 'down', colors["Black"])
+                        elif j==2:
+                            # For Left Turn
+                            draw_arrow(window, (light_positions[i][0] + 14, light_positions[i][1] + y_offset), 'right', colors["Black"])
+
+                    #Left Turn Signals separately 
+                    cv2.circle(window, (light_positions[i][0] + 14, light_positions[i][1] + 100), 20, left_turn_signal, -1)
+                    draw_arrow(window, (light_positions[i][0] + 14, light_positions[i][1] + 100), 'right', colors["Black"])
 
         #Traffic Light Condition for Lane 2
-
         elif i == 1:
             # Draw the traffic lights (small circles) for 5 signals per lane
+            if(accident_vehicle_detected):
+                # Red Light Signals
+                red_light_color = colors["Red"]
+                cv2.circle(window, (light_positions[i][0] - 217, light_positions[i][1]-1), 20, red_light_color, -1)
 
-            # Red Light Signals
-            red_light_color = colors["Red"] if i != current_lane else (100, 100, 100)
-            cv2.circle(window, (light_positions[i][0] - 217, light_positions[i][1]-1), 20, red_light_color, -1)
+                # Yellow Light Signals
+                yellow_light_color = colors["Default"]
+                cv2.circle(window, (light_positions[i][0] + 43 - 210, light_positions[i][1]-1), 20, yellow_light_color, -1)
 
-            #Yellow Light Signals
-            yellow_light_color = colors["Yellow"] if (i == current_lane and time_left <= yellow_light_time) else (100, 100, 100)
-            cv2.circle(window, (light_positions[i][0] + 43 - 210, light_positions[i][1]-1), 20, yellow_light_color, -1)
-
-            # Green Light Signals
-            for j in range(3):
-                x_offset = 70 + j * 50
-                if(emergency_vehicle_detected):
-                    green_light_color = colors["Green"] if i == current_lane else (100, 100, 100)
+                for j in range(3):
+                    x_offset = 70 + j * 50
+                    green_light_color = colors["Default"]
                     cv2.circle(window, (light_positions[i][0] + x_offset - 188, light_positions[i][1]-1), 20, green_light_color, -1)
-                else:
-                    green_light_color = colors["Green"] if i == current_lane and time_left > yellow_light_time else (100, 100, 100)
-                    cv2.circle(window, (light_positions[i][0] + x_offset - 188, light_positions[i][1]-1), 20, green_light_color, -1)
+            else:
+                # Red Light Signals
+                red_light_color = colors["Red"] if i != current_lane else (100, 100, 100)
+                cv2.circle(window, (light_positions[i][0] - 217, light_positions[i][1]-1), 20, red_light_color, -1)
 
-                # Draw the arrows at the green light positions
-                if green_light_color == colors["Green"]:
-                    if j==2:
-                        # For Right Turn
-                        draw_arrow(window, (light_positions[i][0]+ x_offset - 188, light_positions[i][1]-1), 'up', colors["Black"])
-                    elif j==1:
-                        # For Straight
-                        draw_arrow(window, (light_positions[i][0]+ x_offset - 188, light_positions[i][1]-1), 'left', colors["Black"])
-                    elif j==0:
-                        # For Left Turn
-                        draw_arrow(window, (light_positions[i][0]+ x_offset - 188, light_positions[i][1]-1), 'down', colors["Black"])
+                #Yellow Light Signals
+                yellow_light_color = colors["Yellow"] if (i == current_lane and time_left <= yellow_light_time) else (100, 100, 100)
+                cv2.circle(window, (light_positions[i][0] + 43 - 210, light_positions[i][1]-1), 20, yellow_light_color, -1)
 
-                #Left Turn Signals separately 
-                cv2.circle(window, (light_positions[i][0] + 70 - 188, light_positions[i][1]-1), 20, left_turn_signal, -1)
-                draw_arrow(window, (light_positions[i][0] + 70 - 188, light_positions[i][1]-1), 'down', colors["Black"])
+                # Green Light Signals
+                for j in range(3):
+                    x_offset = 70 + j * 50
+                    if(emergency_vehicle_detected):
+                        green_light_color = colors["Green"] if i == current_lane else (100, 100, 100)
+                        cv2.circle(window, (light_positions[i][0] + x_offset - 188, light_positions[i][1]-1), 20, green_light_color, -1)
+                    else:
+                        green_light_color = colors["Green"] if i == current_lane and time_left > yellow_light_time else (100, 100, 100)
+                        cv2.circle(window, (light_positions[i][0] + x_offset - 188, light_positions[i][1]-1), 20, green_light_color, -1)
+
+                    # Draw the arrows at the green light positions
+                    if green_light_color == colors["Green"]:
+                        if j==2:
+                            # For Right Turn
+                            draw_arrow(window, (light_positions[i][0]+ x_offset - 188, light_positions[i][1]-1), 'up', colors["Black"])
+                        elif j==1:
+                            # For Straight
+                            draw_arrow(window, (light_positions[i][0]+ x_offset - 188, light_positions[i][1]-1), 'left', colors["Black"])
+                        elif j==0:
+                            # For Left Turn
+                            draw_arrow(window, (light_positions[i][0]+ x_offset - 188, light_positions[i][1]-1), 'down', colors["Black"])
+
+                    #Left Turn Signals separately 
+                    cv2.circle(window, (light_positions[i][0] + 70 - 188, light_positions[i][1]-1), 20, left_turn_signal, -1)
+                    draw_arrow(window, (light_positions[i][0] + 70 - 188, light_positions[i][1]-1), 'down', colors["Black"])
 
         #Traffic Light Condition for Lane 3
         elif i == 2:
             # Draw the traffic lights (small circles) for 5 signals per lane
+            if(accident_vehicle_detected):
+                # Red Light Signals
+                red_light_color = colors["Red"]
+                cv2.circle(window, (light_positions[i][0]-17, light_positions[i][0] - 277),20, red_light_color, -1)
 
-            # Red Light Signals
-            red_light_color = colors["Red"] if i != current_lane else (100, 100, 100)
-            cv2.circle(window, (light_positions[i][0]-17, light_positions[i][0] - 277),20, red_light_color, -1)
+                # Yellow Light Signals
+                yellow_light_color = colors["Default"]
+                cv2.circle(window, (light_positions[i][0]-17, light_positions[i][1] - 38), 20, yellow_light_color, -1)
 
-            # Yellow Light Signals
-            yellow_light_color = colors["Yellow"] if (i == current_lane and time_left <= yellow_light_time) else (100, 100, 100)
-            cv2.circle(window, (light_positions[i][0]-17, light_positions[i][1] - 38), 20, yellow_light_color, -1)
-
-            # Green Light Signals
-            for j in range(3):
-                y_offset = 70 + j * 50
-                if(emergency_vehicle_detected):
-                    green_light_color = colors["Green"] if i == current_lane else (100, 100, 100)
+                for j in range(3):
+                    y_offset = 70 + j * 50
+                    green_light_color = colors["Default"]
                     cv2.circle(window, (light_positions[i][0]-17, light_positions[i][1] + y_offset - 57), 20, green_light_color, -1)
-                else:
-                    green_light_color = colors["Green"] if i == current_lane and time_left > yellow_light_time else (100, 100, 100)
-                    cv2.circle(window, (light_positions[i][0]-17, light_positions[i][1] + y_offset - 57), 20, green_light_color, -1)
-                
-                # Draw the arrows at the green light positions
-                if green_light_color == colors["Green"]:
-                    if j==0:
-                        # For Left Turn
-                        draw_arrow(window, (light_positions[i][0] - 17, light_positions[i][1] + y_offset - 57), 'left', colors["Black"])
-                    elif j==1:
-                        # For Straight
-                        draw_arrow(window, (light_positions[i][0] - 17, light_positions[i][1] + y_offset - 57), 'up', colors["Black"])
-                    elif j==2:
-                        # For Right Turn
-                        draw_arrow(window, (light_positions[i][0] - 17, light_positions[i][1] + y_offset - 57), 'right', colors["Black"])
+            else:
+                # Red Light Signals
+                red_light_color = colors["Red"] if i != current_lane else (100, 100, 100)
+                cv2.circle(window, (light_positions[i][0]-17, light_positions[i][0] - 277),20, red_light_color, -1)
 
-                #Left Turn Signals separately 
-                cv2.circle(window, (light_positions[i][0] - 17, light_positions[i][1] + 13), 20, left_turn_signal, -1)
-                draw_arrow(window, (light_positions[i][0] - 17, light_positions[i][1] + 13), 'left', colors["Black"])
+                # Yellow Light Signals
+                yellow_light_color = colors["Yellow"] if (i == current_lane and time_left <= yellow_light_time) else (100, 100, 100)
+                cv2.circle(window, (light_positions[i][0]-17, light_positions[i][1] - 38), 20, yellow_light_color, -1)
+
+                # Green Light Signals
+                for j in range(3):
+                    y_offset = 70 + j * 50
+                    if(emergency_vehicle_detected):
+                        green_light_color = colors["Green"] if i == current_lane else (100, 100, 100)
+                        cv2.circle(window, (light_positions[i][0]-17, light_positions[i][1] + y_offset - 57), 20, green_light_color, -1)
+                    else:
+                        green_light_color = colors["Green"] if i == current_lane and time_left > yellow_light_time else (100, 100, 100)
+                        cv2.circle(window, (light_positions[i][0]-17, light_positions[i][1] + y_offset - 57), 20, green_light_color, -1)
+                    
+                    # Draw the arrows at the green light positions
+                    if green_light_color == colors["Green"]:
+                        if j==0:
+                            # For Left Turn
+                            draw_arrow(window, (light_positions[i][0] - 17, light_positions[i][1] + y_offset - 57), 'left', colors["Black"])
+                        elif j==1:
+                            # For Straight
+                            draw_arrow(window, (light_positions[i][0] - 17, light_positions[i][1] + y_offset - 57), 'up', colors["Black"])
+                        elif j==2:
+                            # For Right Turn
+                            draw_arrow(window, (light_positions[i][0] - 17, light_positions[i][1] + y_offset - 57), 'right', colors["Black"])
+
+                    #Left Turn Signals separately 
+                    cv2.circle(window, (light_positions[i][0] - 17, light_positions[i][1] + 13), 20, left_turn_signal, -1)
+                    draw_arrow(window, (light_positions[i][0] - 17, light_positions[i][1] + 13), 'left', colors["Black"])
 
         #Traffic Light Condition for Lane 4
         elif i == 3:
             # Draw the traffic lights (small circles) for 5 signals per lane
+            if(accident_vehicle_detected):
+                # Red Light Signals
+                red_light_color = colors["Red"]
+                cv2.circle(window, (light_positions[i][0] + 215, light_positions[i][1] + 114), 20, red_light_color, -1)
 
-            # Red Light Signals
-            red_light_color = colors["Red"] if i != current_lane else (100, 100, 100)
-            cv2.circle(window, (light_positions[i][0] + 215, light_positions[i][1] + 114), 20, red_light_color, -1)
+                # Yellow Light Signals
+                yellow_light_color = colors["Default"]
+                cv2.circle(window, (light_positions[i][0] + 165, light_positions[i][1] + 114), 20, yellow_light_color, -1)
 
-            # Yellow Light Signals
-            yellow_light_color = colors["Yellow"] if (i == current_lane and time_left <= yellow_light_time) else (100, 100, 100)
-            cv2.circle(window, (light_positions[i][0] + 165, light_positions[i][1] + 114), 20, yellow_light_color, -1)
-
-            # Green Light Signals
-            for j in range(3):
-                x_offset = 0 + j * 50
-                if(emergency_vehicle_detected):
-                    green_light_color = colors["Green"] if i == current_lane else (100, 100, 100)
+                for j in range(3):
+                    x_offset = 0 + j * 50
+                    green_light_color = colors["Default"]
                     cv2.circle(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 20, green_light_color, -1)
-                else:
-                    green_light_color = colors["Green"] if i == current_lane and time_left > yellow_light_time else (100, 100, 100)
-                    cv2.circle(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 20, green_light_color, -1)
-                
-                # Draw the arrows at the green light positions
-                if green_light_color == colors["Green"]:
-                    if j==2:
-                        # For Left Turn
-                        draw_arrow(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 'up', colors["Black"])
-                    elif j==1:
-                        # For Straight
-                        draw_arrow(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 'right', colors["Black"])
-                    elif j==0:
-                        # For Right Turn
-                        draw_arrow(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 'down', colors["Black"])
+            else:
+                # Red Light Signals
+                red_light_color = colors["Red"] if i != current_lane else (100, 100, 100)
+                cv2.circle(window, (light_positions[i][0] + 215, light_positions[i][1] + 114), 20, red_light_color, -1)
 
-                #Left Turn Signals separately 
-                cv2.circle(window, (light_positions[i][0] + 115, light_positions[i][1] + 114), 20, left_turn_signal, -1)
-                draw_arrow(window, (light_positions[i][0] + 115, light_positions[i][1] + 114), 'up', colors["Black"])
+                # Yellow Light Signals
+                yellow_light_color = colors["Yellow"] if (i == current_lane and time_left <= yellow_light_time) else (100, 100, 100)
+                cv2.circle(window, (light_positions[i][0] + 165, light_positions[i][1] + 114), 20, yellow_light_color, -1)
+
+                # Green Light Signals
+                for j in range(3):
+                    x_offset = 0 + j * 50
+                    if(emergency_vehicle_detected):
+                        green_light_color = colors["Green"] if i == current_lane else (100, 100, 100)
+                        cv2.circle(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 20, green_light_color, -1)
+                    else:
+                        green_light_color = colors["Green"] if i == current_lane and time_left > yellow_light_time else (100, 100, 100)
+                        cv2.circle(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 20, green_light_color, -1)
+                    
+                    # Draw the arrows at the green light positions
+                    if green_light_color == colors["Green"]:
+                        if j==2:
+                            # For Left Turn
+                            draw_arrow(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 'up', colors["Black"])
+                        elif j==1:
+                            # For Straight
+                            draw_arrow(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 'right', colors["Black"])
+                        elif j==0:
+                            # For Right Turn
+                            draw_arrow(window, (light_positions[i][0] + x_offset + 15, light_positions[i][1] + 114), 'down', colors["Black"])
+
+                    #Left Turn Signals separately 
+                    cv2.circle(window, (light_positions[i][0] + 115, light_positions[i][1] + 114), 20, left_turn_signal, -1)
+                    draw_arrow(window, (light_positions[i][0] + 115, light_positions[i][1] + 114), 'up', colors["Black"])
 
         # Add "Signal for Lane no." text beside each signal
         cv2.putText(window, f"Signal for Lane {i + 1}", text_position[i], cv2.FONT_HERSHEY_COMPLEX, 0.7, colors["dodger blue"], 2, cv2.LINE_AA)
@@ -511,10 +623,11 @@ class TrafficSignalSimulator(QtWidgets.QWidget):
         all_videos_ended = True
         vehicle_counts = []
         emergency_vehicle_detected_in_any_lane = False
+        accident_vehicle_detected_in_any_lane = False
         print("\nProcessing frames from all lanes...")
         
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(process_lane, idx, caps[idx], video_writers[idx], emergency_vehicle_active[idx]) for idx in range(4)]
+            futures = [executor.submit(process_lane, idx, caps[idx], video_writers[idx], emergency_vehicle_active[idx],accident_vehicle_active[idx]) for idx in range(4)]
             results = [f.result() for f in futures]
 
         for idx, result in enumerate(results):
@@ -524,12 +637,15 @@ class TrafficSignalSimulator(QtWidgets.QWidget):
                 return
             
             all_videos_ended = False
-            vehicle_count, frame, emergency_detected = result
+            vehicle_count, frame, emergency_detected,accident_detected = result
             vehicle_counts.append(vehicle_count)
             if emergency_detected:
                 emergency_vehicle_detected_in_any_lane = True
                 print(f"Emergency vehicle detected in Lane {idx + 1}!")
-
+            elif accident_detected:
+                accident_vehicle_detected_in_any_lane = True
+                print(f"Accident detected in Lane {idx + 1}!")
+                
         total_vehicles = sum(vehicle_counts) if sum(vehicle_counts) != 0 else 1
         print(f"\nTotal vehicles detected across all lanes: {total_vehicles}\n")
 
@@ -538,9 +654,19 @@ class TrafficSignalSimulator(QtWidgets.QWidget):
             self.running = False
             QtWidgets.qApp.quit()
             return
+        
+        # Calculate average vehicle count per lane for the cycle
+        average_vehicle_count = total_vehicles / len(vehicle_counts)
+        print(f"Average vehicles per lane in this cycle: {average_vehicle_count:.2f}")
+
+        # Calculate percentage of vehicles in each lane
+        vehicle_percentages = [(count / total_vehicles) * 100 for count in vehicle_counts]
+        for idx, percent in enumerate(vehicle_percentages):
+            print(f"Lane {idx + 1} has {vehicle_counts[idx]} vehicles ({percent:.2f}%)")
+
 
         lane_timings = [
-            baseline_time + (count / total_vehicles) * 3.9
+            baseline_time + (count / total_vehicles) * 4.1
             for count in vehicle_counts
         ]
 
@@ -550,19 +676,40 @@ class TrafficSignalSimulator(QtWidgets.QWidget):
                 if active:
                     print(f"Emergency vehicle active in Lane {i + 1}, setting green light until vehicle passes.")
                     lane_statuses = "Green"
-
                     time_left = lane_timings[i]
+
                     # Continue checking if emergency vehicle is still detected
                     while emergency_vehicle_active[i]:
                         print(f"Keeping Lane {i + 1} green for emergency vehicle.")
-                        update_gui(lane_statuses, i, time_left, vehicle_counts, True)
+                        update_gui(lane_statuses, i, time_left, vehicle_counts, True, False)
                         QtWidgets.qApp.processEvents()
                         time.sleep(1)  # Pause for a second before next check
                         # Process next frame to check if emergency vehicle is still detected by skipping time
-                        _, _, emergency_detected = process_lane(i, caps[i], video_writers[i], skip_time=True)
+                        _, _, emergency_detected , _ = process_lane(i, caps[i], video_writers[i], skip_time_emergency = True, skip_time_accident = False)
                         emergency_vehicle_active[i] = emergency_detected
 
+                    emergency_vehicle_detected_in_any_lane = True
+                    emergency_detected_lane = idx
                     print(f"Emergency vehicle passed in Lane {i + 1}. Resuming normal traffic control.")
+
+        elif accident_vehicle_detected_in_any_lane :
+            for i, active in enumerate(accident_vehicle_active):
+                if active:
+                    print(f"Accident happend in Lane {i + 1}. We turns all signal into red")
+                    lane_statuses = "Red"
+                    time_left = lane_timings[i]
+                    # Continue checking if emergency vehicle is still detected
+                    while accident_vehicle_active[i]:
+                        update_gui(lane_statuses, i, time_left, vehicle_counts, False, True)
+                        QtWidgets.qApp.processEvents()
+                        time.sleep(1)  # Pause for a second before next check
+                        # Process next frame to check if emergency vehicle is still detected by skipping time
+                        _, _, _, accident_detected = process_lane(i, caps[i], video_writers[i], False, True)
+                        accident_vehicle_active[i] = accident_detected
+
+                    accident_vehicle_detected_in_any_lane = True
+                    accident_detected_lane = i
+                    print(f"\n Accident safely cleared from lane {idx + 1}\n. Resuming normal traffic control.\n")
 
         else:
             # Sort lanes by vehicle count to determine the order of green signals
@@ -581,36 +728,69 @@ class TrafficSignalSimulator(QtWidgets.QWidget):
                 print(f"Green light timing for Lane {i + 1}: {lane_timings[i]:.2f} sec")  # Display green light timings in terminal
                 print(f"Yellow Light: Lane {previous_lane + 1} for {yellow_light_time} seconds before Lane {i+1} turns green\n")
                 while time_left > 0:
-                    update_gui(lane_statuses, i, time_left, vehicle_counts, False)
+                    update_gui(lane_statuses, i, time_left, vehicle_counts, False, False)
                     QtWidgets.qApp.processEvents()
                     time.sleep(0.005)
                     if not self.running or self.paused:
                         return
-                    time_left -= 0.04
-
-            lane_statuses[i] = "Red"
+                    time_left -= 0.03
 
         # Log to CSV after processing all lanes in the sorted order of the current cycle
         with open(log_file_path, 'a', newline='') as log_file:
             log_writer = csv.writer(log_file)
             if(emergency_vehicle_detected_in_any_lane):
-                for idx in sorted_lane_indices:
-                    log_writer.writerow([
-                        cycle_count + 1,  # Corrected cycle count
-                        idx + 1,  # Lane number in sorted order
-                        vehicle_counts[idx],  # Vehicle count for this lane
-                        lane_statuses[idx],  # Signal state for this lane
-                        lane_timings[idx],  # Green light time for this lane
-                        "Detected"
-                    ])
+                for idx in range(4):  
+                    if(idx==emergency_detected_lane):
+                        log_writer.writerow([
+                            cycle_count + 1,  # Corrected cycle count
+                            idx + 1,  # Lane number in sorted order
+                            vehicle_counts[idx],  # Vehicle count for this lane
+                            f"{vehicle_percentages[idx]:.2f}%",  # Percentage of total vehicles
+                            "Until Emergency Vehicle Passed",  # Green light time for this lane
+                            "Detected", # Emergency Vehicle Detection
+                            "Not Detected"
+                        ])
+                    else:
+                        log_writer.writerow([
+                            cycle_count + 1,  # Corrected cycle count
+                            idx + 1,  # Lane number in sorted order
+                            vehicle_counts[idx],  # Vehicle count for this lane
+                            f"{vehicle_percentages[idx]:.2f}%",  # Percentage of total vehicles
+                            "Suspended due to Emergency Vehicles",  # Green light time for this lane
+                            "Not Detected", # Emergency Vehicle Detection
+                            "Not Detected"
+                        ])
+            elif(accident_vehicle_detected_in_any_lane):
+                for idx in range(4):  
+                    if(idx==accident_detected_lane):
+                        log_writer.writerow([
+                            cycle_count + 1,  # Corrected cycle count
+                            idx + 1,  # Lane number in sorted order
+                            vehicle_counts[idx],  # Vehicle count for this lane
+                            f"{vehicle_percentages[idx]:.2f}%",  # Percentage of total vehicles
+                            "Until Accident is cleared",  # Green light time for this lane
+                            "Not Detected", # Emergency Vehicle Detection
+                            "Detected"
+                        ])
+                    else:
+                        log_writer.writerow([
+                            cycle_count + 1,  # Corrected cycle count
+                            idx + 1,  # Lane number in sorted order
+                            vehicle_counts[idx],  # Vehicle count for this lane
+                            f"{vehicle_percentages[idx]:.2f}%",  # Percentage of total vehicles
+                            "Suspended due to Accident",  # Green light time for this lane
+                            "Not Detected", # Emergency Vehicle Detection
+                            "Not Detected"
+                        ])
             else:
                 for idx in sorted_lane_indices:
                     log_writer.writerow([
                         cycle_count + 1,  # Corrected cycle count
                         idx + 1,  # Lane number in sorted order
                         vehicle_counts[idx],  # Vehicle count for this lane
-                        lane_statuses[idx],  # Signal state for this lane
+                        f"{vehicle_percentages[idx]:.2f}%",  # Percentage of total vehicles
                         lane_timings[idx],  # Green light time for this lane
+                        "Not Detected", # Emergency Vehicle Detection
                         "Not Detected"
                     ])
 
